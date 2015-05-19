@@ -1,0 +1,10 @@
+
+>Secctl<
+
+Linux Security Module (LSM)
+
+see ./secctl-0.*/linux-source-3.16.2/security/secctl/README for a description
+
+(c) TomVT 2015
+
+

@@ -1,0 +1,1306 @@
+This is README for <secctl> Linux Security Module (LSM)
+ 
+ *	<secctl> is just an abbreviation for "Security Control".
+ *
+ *
+ * Copyright (C) 2015 (TomVt / secctlfb * at * t-online dot de)
+ *	Version 0.2: Kernel LSM + UserSpace admin tool (also called secctl)
+ *	rule decision engine rewritten (x,l,r,w,a)
+ *	MountID substituted by DeviceID (major/minor of device)
+ *	moved prelim. cmdline rule parser from Kernel to UserSpace;
+ * 	implies a new protocol for communication between Kernel<->UserSpace;
+ *      => a new UserSpace admin tool <secctl> was written;
+ *
+ *
+ * Copyright (C) 2012 (TomVt / secctlfb * at * t-online dot de)
+ *	Version 0.1: Kernel LSM only
+ *	initial implementation for Kernel 3.2.4
+ *	basic rule decision engine (hex value only)
+ *
+
+Current status: UNSTABLE
+
+Please note that this version 0.2 is the first public release of <secctl>.
+It would need a lot of testing to get to a stable status.
+
+Secctl is not part of the Linux Mainstream Kernel.
+
+
+###########################################################################
+Editorial note: for viewing this README, we recommend to use a fixed
+		character size and tab being 8 characters.
+
+###########################################################################
+
+Chapters:
+
+ 1: Purpose of secctl and a little bit of history
+ 2: Architecture of <secctl>
+ 3: Installation & Development platform
+ 4: Usage & examples for typical rule-sets
+ 5: Whitelist vs. Blacklist rule-sets
+ 6: Howto to add or change a single rule:
+ 7: Security consideration
+ 8: Todo
+ 9: Feedback
+ 10: Bugs
+
+
+###########################################################################
+
+Chapter 1: Purpose of secctl and a little bit of history
+
+This program does enforce mandatory access control (MAC) for a specific
+requirement profile by using the Linux kernel LSM interface hooks.
+ 
+Early on, we started to use "Knoppix", which is a Linux Live-System
+distribution based on a 4 Gigabyte image in ISO9660 format. Quickly
+realizing that this system need to be optimized from a security perspective,
+one of the main objectives was to enhance permission control for running
+processes. Supported by other well-established UNIX best practices, 
+the system should be ready to provide a secure platform with moderate
+strength of mechanism.
+
+However, as any small modification to the 4 GB ISO image would require
+a complete re-mastering of the entire image, a more flexible solution
+was needed without affecting the ISO image. So any solution need to be within
+the kernel itself, since the kernel can be modified independendly from
+the image.
+
+Being aware of certain Linux security solutions like cgroups, namespaces,
+seccomp, and in particular capabilities, we decided to get more familiar 
+with the LSM infrastructure, since it is well established, very stable,
+and does provide a wide range of hooks where from we could choose the
+necessary ones.
+
+Existing LSM implementations like SELinux or Smack do heavily rely on
+Extended File Attributes for any object to be controlled. To assign these
+attributes permanently, filesystem and objects usually need to be modified.
+This is not what we want.
+
+AppArmor and Tomoyo do rely very much on pathname based security. 
+Unfurtunately, in these days, a pathname is far from being a unique 
+identifier for an object. So this approach cannot meet our required
+strength of mechanism.
+
+Conclusively, we did write a new LSM.
+
+Our LSM has a clear scope:
+
+	To control access to objects in mounted filesystems
+	without having to modify the filesystem or the objects.
+
+Here are our detailed objectives:
+
+1)
+for any process within a given UserID (UID), do control execution of 
+any program according to a whitelist-only rule-set.
+
+2)
+for any process within a given UserID (UID), do control read/write/append
+access to objects in mounted filesystems according to whitelist or
+blacklist rule-set.
+
+3)
+to implement objectives 1 and 2, do only use existing attributes of objects,
+which are readily available when the kernel does call the LSM hooks.
+The filesystem shall not be modified to enforce the LSM.
+
+4)
+ease of use is a clear requirement. 
+
+5)
+do not degrade performance or function of any process to be controlled 
+to the extent the user would notice the running LSM.
+
+
+Our security mechanism is still in place when a single process 
+gets compromised by an adversary, as long as the UID is still the same
+and a policy for that UID was set. Most other LSM implementations
+do focus on setting a policy for a certain single program or its children.
+Our scope is broader, since we encompass any process already running or
+yet to be started within a certain given UID.
+
+In this README, we focus on a discussion of examples for UID>0.
+To implement a rule-set for UID=0, special care need to be taken because 
+of side-effects and certain intricacies. For UID>0 it is much more easily
+possible to assign certain processes to a single UID (and this was our 
+primary goal). 
+
+If you want to see some illustrative examples for rule-sets right away, 
+then jump to Chapter 4 now.
+
+
+###########################################################################
+
+Chapter 2: Architecture of <secctl>
+
+<secctl> does comprise a UserSpace admin tool (also called "secctl"),
+and a kernel LSM module. Between the two, administrative communication
+a facilitated via special device file /dev/secctl :
+
+			"secctl"
+ 			  ^
+ 			  |
+ UserSpace		  |
+			  |
+ 			  v
+ -----------------------------------------------------------------------
+ 			/dev/secctl
+ -----------------------------------------------------------------------
+ 			  ^
+ 			  |
+			  v
+ KernelSpace		 LSM module
+
+
+Later on, when a UserSpace process would like to get access a certain object
+within a specific filesystem, the kernel finally does ask our LSM module
+for permission, which we deny or accept according to an active rule-set.
+
+
+###########################################################################
+
+Chapter 3: Installation & Development platform
+
+You would need to follow steps A) and B) if you plan to compile secctl for
+youself.
+
+Secctl was developed and tested under Linux Distribution KNOPPIX 7.4
+with kernel 3.16.2-64 x86_64 and qemu-*-x86_64, which is 
+ - 64 bit Kernel and 32 bit UserSpace.
+Not tested is
+ - 64 bit Kernel and 64 bit UserSpace,
+ - 32 bit Kernel and 32 bit UserSpace.
+  
+For testing new kernels, we recommend to use a virtual machine like QEMU.
+You need to load kernel modules like "kvm" and "kvm_amd" (kvm_intel) before.
+
+It might be helpful to compile and start a new kernel with QEMU without secctl
+first to see if you get the generic toolchain running.
+
+As Knoppix is strongly Debian-based, this source code should compile on a
+wide range of other Linux distributions (not tested yet).
+
+Please note that in March 2015 the LSM registration interface was changed
+a little bit with earlier 4.x kernels to allow stacking of LSMs (see lwn.net).
+We are probably not yet compatible with that new registration interface.
+Before 4.x you need to deactivate other LSMs to active this new secctl LSM.
+This latter recommendation does apply to our development kernel 3.16.2.
+
+This is also a good place to mention that a LSM module is not like any other
+module. A LSM module must be compiled into the kernel, and will always be 
+initialized when the kernel starts. Just the internal initialization steps
+are alike other modules.
+
+Now lets start:
+
+A) First you need to compile a new kernel with the new secctl kernel module.
+   I do provide a secctl*.tgz archive with all the complete relevant files.
+   (this is not a diff like patch -p1 < difffile)
+   
+First get kernel 3.16.2-64 which was provided with Knoppix 7.4.
+You may try other late 3.x kernels.
+
+> cd /home/knoppix
+> tar xf /usr/src/linux-source-3.16.2.tar.bz2	(which is part of KNOPPIX 7.4)
+> cd linux-source-3.16.2
+
+For the top-level Makefile, you might add '-64' to the 4th line, so the head
+looks like:
+VERSION = 3
+PATCHLEVEL = 16
+SUBLEVEL = 2
+EXTRAVERSION = -64
+
+
+> tar xf /somewhere/secctl-0.2.tgz
+
+ # needed for KernelSpace only
+
+ security/Kconfig		(modified, will overwrite original file)
+ security/Makefile		(modified, will overwrite original file)
+ security/secctl/Kconfig	(modified, will overwrite original file)
+ security/secctl/Makefile	(modified, will overwrite original file)
+ security/secctl/lsm-secctl.c	(new)
+
+ # needed for KernelSpace and UserSpace admin tool as well
+
+ security/secctl/common.h	(new)
+
+ # needed for UserSpace admin tool only
+
+ security/secctl/secctl.c	(the main tool source)
+ security/secctl/sha256.h	(only needed for passwd handling, enabled by default)
+ security/secctl/make.sh	(were were just to lazy to write a makefile here) 
+
+	# todo: move UserSpace stuff out of this dir, since when we compile
+	# the kernel(!), secctl.c gets compiled automaticall (but not linked into lsm-secctl.o)
+ 
+ # other files
+ 
+ security/secctl/README
+ security/secctl/LICENSE
+
+
+> make xconfig			(kernel config menu)
+
+ look into main section "Security" for
+  [v] secctl support
+  
+ [save new config into .config]
+ 
+> grep SECURITY .config | grep SECCTL
+CONFIG_SECURITY_SECCTL=y
+CONFIG_SECURITY_SECCTL_BOOTPARAM_VALUE=1
+
+> make [-j4] bzImage
+
+Now we start the new kernel with QEMU (qemu-system-x86_64)
+
+bzImage=/home/knoppix/linux-source-3.16.2/arch/x86/boot/bzImage
+cdrom=/mnt-system/KNOPPIX/KNOPPIX
+initrd=/mnt-system/boot/minirt.gz
+
+> qemu-system-x86_64 -cpu phenom -m 512M -net none -parallel none -k de -enable-kvm \
+  -vga std -kernel $bzImage -append "2 vga=3 security=secctl nonetworkmanager \
+  vsyscall=none log_buf_len=131072 noimage no3d mce=off language=en keyboard=de \
+  drm nofb nofirewire nopcmcia nosound" -initrd $initrd -cdrom $cdrom -hdb fat:/tmp
+  
+  (note: structure is: qemu <paramsforqemu> -append "<paramsforkernel>")
+  
+
+You need not all of those parameters. This is just an example. Anyway you need
+"security=secctl" since we did not set CONFIG_DEFAULT_SECURITY_SECCTL in .config
+
+Within the virtual machine, look first if secctl was found and enabled:
+
+ > dmesg | grep secctl
+ 0.014294] secctl: init() done."
+
+
+B) Howto compile the UserSpace admin tool "secctl"
+
+ Extract secctl-0.2.tgz like in step A), then
+
+ > cd security/secctl
+
+ Look into top of sourcefile "secctl.c" for detailed installation instructions (STEPS 1-7).
+ 
+ > sh make.sh	(will compile "secctl" binary from secctl.c, common.h and sha256.h)
+
+ No other library than glibc is needed to compile the UserSpace admin tool.
+
+ > cp secctl /tmp
+ 
+ and restart QEMU with the new kernel compiled in step A)
+ 
+ Within the virtual system you can 
+ > mount /dev/sda1 /mnt
+ > cp /mnt/secctl /sbin
+ 
+ This is possible since we did provide /tmp as virtual harddisk to QEMU 
+ by using command option "-hdb fat:/tmp" (see above).
+
+ Within the virtual system, according to STEPs as described in secctl.c, now you need to
+ 
+  * STEP 1: create a new user and group "secctl"
+            Note the the numeric IDs of the user and the group:
+	     Those must coincide with the ones compiled into the
+	     UserSpace admin tool "secctl".
+   
+  * STEP 2: create /dev/secctl with the correct permission
+            (we do a very strict permission check !)
+	 
+	 To circumvent those strict permission checks, you might
+	 temporaily disable ENABLE_STRICT_RESSOURCE_LIMITS in secctl.c
+	 
+	   
+ To not repeat STEPs 1 and 2 each time the virtual instance is started, you
+ might add those steps to "initrd=/mnt-system/boot/minirt.gz", which is 
+ given as command line parameter to qemu. 
+ a) extract minirt.gz
+ 
+    > su	(since some device files are created we need root)
+    > md temp
+    > cd temp
+    > gzip -dc /mnt-system/boot/minirt.gz
+    
+ b) edit: add script steps at almost bottom of /init script (before line "exec /sbin/init")
+    like:
+    
+	mkdir /sda1
+	mount /dev/sda1 /sda1
+	busybox cp /sda1/secctl /bin
+	umount /sda1
+
+	# STEP 1:
+	#
+	# ONLY FOR TESTING WITHOUT a PASSWORD!
+	#
+	echo "secctl::16533:0:99999:7:::" >> /etc/shadow
+	#
+	# note that 1001 must conincide with definitions in secctl.c :
+	#	#define	SECCTL_UID		1001
+	#	#define	SECCTL_GID		1001
+	#
+	echo "secctl:x:1001:" >> /etc/group
+	echo "secctl:x:1001:1001:,,,:/home/secctl:/bin/bash" >> /etc/passwd
+	#
+
+	mkdir /home/secctl
+	chown secctl.secctl /home/secctl
+
+	# STEP 2:
+	#
+	mknod_secctl() {
+
+        	sleep 6 
+
+        	echo ""
+        	echo ""
+        	echo "####### initializing secctl ... ####################"
+        	set -x
+        	/bin/busybox mknod /dev/secctl c 40 0
+        	/bin/busybox chown root.secctl /dev/secctl
+        	/bin/busybox chmod 660 /dev/secctl
+        	/bin/ls -ali /dev/secctl
+        	set -
+        	echo "####################################################"
+        	echo ""
+        	echo ""
+
+	}
+        mknod_secctl &
+	
+	# now comes the line "exec /sbin/init.."
+	
+	
+ c) re-create minirt.gz (still as root)
+     
+    > find . | cpio -o --format newc | gzip - > /tmp/minirt_new.gz
+    
+    > maybe cp /tmp/minirt_new /mnt-system/boot/minirt.gz
+    
+    > or set initrd=/tmp/minirt_new.gz for temporarily testing.
+ 
+
+ Look if you can talk to the secctl kernel module
+
+ > secctl on
+ 
+ Look into syslog if you see "on".
+
+ > secctl off
+ 
+ Then try setting simple rules like in Chapter 4, reactivate secctl, 
+ do some action to match the rule, an look into syslog;
+ 
+
+#############################################################################
+
+Chapter 4: Usage & examples for typical rule-sets
+
+Let's start the UserSpace admin tool without any parameter under new UID secctl:
+(STEP 1 of installation was to create a new UID/GID called "secctl")
+
+************************************************************************************************
+>su secctl (or su to root)
+
+>secctl 
+
+secctl  Nb. [accept|deny][+]  UID  [xlrwa] /mnt  I_Nb.  I_UID   [rdlbcsf]   name
+secctl  0         accept     1000   x      /usr    *      *       d          *		(example1)
+secctl  1         accept+    1000   x      /usr  546456   *       r          sshd	(example2)
+secctl  2           deny+    1000   x      /usr    *      *       *          *		(example3)
+
+  Note: to avoid shell argument expansion of "*", do bash> export GLOBIGNORE=\*
+        before calling secctl.
+
+------------------------------------------------------------------------------------------------
+secctl  on			# activate LSM
+secctl  off			# deactivate LSM
+secctl  dpa			# set default policy: accept (default)
+secctl  dpd			# set default policy: deny
+secctl  ksr			# show rules: trigger kernel LSM to call printk to syslog
+secctl  sr			# show rules: directly retrieve rules and call printf
+secctl  cr			# clear rules
+secctl  lock <passwd>		# lock LSM with passwd (range:[a-zA-Z0-9]*[12-32], no spaces)
+secctl  lockm <passwd>		#  < same as before, and deny kernel remount, umount, mount >
+secctl  unlock <passwd>		# un-lock LSM with passwd
+
+************************************************************************************************
+
+
+
+Typical steps you might follow now:
+
+a) start a new shell
+
+	> bash
+	> export GLOBIGNORE=\*
+
+b) deactivate the kernel LSM secctl if it was active:
+
+ 	> secctl off
+	
+	(our kernel module would not accept/change rules if in status "on")
+
+c) set new rules, or change rules according to your specific rule-set, e.g.
+
+	> secctl 0 accept+ 1000 x / * * r ls
+	
+	(this rule would log any execution of /bin/ls if executed with UID=1000)
+	
+	(see Chapter 6 for a complete description of setting/changing rules)
+	
+d) look into syslog, or at terminal, or verify existing rule-set in the kernel LSM:
+
+	> secctl sr	
+	
+	(does retrieve rules from KernelSpace to Userspace and call printf to terminal)
+	(Note the last parameter which is printed at any rule: This is our .account
+	element which does count any rule-match. See note in lsm-secctl.c for discussion
+	of correctness and concurreny issue)
+	
+	or
+	> secctl ksr
+	
+	(does printk rule-set from our kernel module via syslog to messages file)
+	
+e) activate the kernel LSM secctl with:
+
+	> secctl on
+	
+	(you might look into syslog/messages again for short note "on")
+	
+	(do type some /bin/ls /somedir and look into syslog messages file again,
+	 look e.g. for Inode-Nb that should be like the one you see with ls -ali /bin/ls)
+	
+	(Note that for any message into syslog, 
+	   .mask and .deviceID are printed as HEX,
+	   .type is printed as OCT
+	 which you could compare with the numbers you see via the command > stat /)
+	
+f) consider locking the LSM with
+
+	> secctl lock passwd
+	
+	or
+	
+	> secctl lockm passwd
+	
+	(to unlock later, you need the passwd)
+	
+g) if finished, leave shell to avoid side-effects with GLOBIGNORE 
+   (if you intend to do other admin things)
+   
+
+Now we do provide some examples for typical rule-sets:
+
+Order of rule-matching in our kernel LSM module is simply to start with rule 0,
+then if no match, try rule 1, and so on ... until the last valid rule.
+
+
+EXAMPLE-1: execution whitelist for firefox/iceweasel (tested for version 32)
+
+0  accept	 1000	x	/KNOPPIX	*		*	d	* 
+1  accept	 1000	x	/KNOPPIX	659115		*	r	iceweasel 
+2  accept	 1000	l	/KNOPPIX	159494		*	r	ld-2.19.so
+3  deny+	 1000	x	/KNOPPIX	*		*	*	* 
+
+rule 0:	accept access/traverse for any process under UID=1000 to any directory ('d')
+	on filesystem /KNOPPIX
+rule 1:	accept execution of iceweasel binary (not the shellscript) which is a regular file ('r')
+	with inode number 659115 under UID=1000 from filesystem /KNOPPIX
+rule 2:	accept indirect invocation of the runtime linker ld-2.19.so (note the 'l') 
+	which is a regular file ('r') with inode number 159494 under UID=1000 from 
+	filesystem /KNOPPIX. The parameter 'l' is neccessary to distinguish an indirect
+	invocation from a direct execution of ld.so (the latter is denied then.
+	If you would give param 'x' instead of 'x', then we would not be able
+	to prevent a direct execution.
+rule 3: deny execution of any other program for UID=1000 from filesystem /KNOPPIX
+	and log any match with this rule.
+
+For Linux Knoppix Live distribution a double set of rules is necessary, since
+all files are retrieved via the virtual /UNIONFS filesystem. Note that inode
+numbers do differ between /KNOPPIX and /UNIONFS. So this would look like:
+
+4  accept	 1000	x	/UNIONFS	*		*	d	* 
+5  accept	 1000	x	/UNIONFS	<adapt>		*	r	iceweasel 
+6  accept	 1000	l	/UNIONFS	<adapt>		*	r	ld-2.19.so
+7  deny+	 1000	x	/UNIONFS	*		*	*	* 
+
+For a traditional physical filesystem these double-rules would not be necessary.
+
+Notes:
+- Traditional UNIX permissions will still be checked before our LSM.
+- You might consider additional rules for dbus-daemon and dbus-launch if you need it.
+- rule 3 does not deny execution of programs from other filesystems.
+  If you intend to do so, add more deny-rules for those other filesystems.
+  (Anyway, it is good practice to mount /tmp , /var, maybe /home as "noexec" already).
+- You need to have mounted /mnt (like /KNOPPIX) before setting a rule.
+- Preventing a direct execution of ld.so does break the 'ldd' shellscript,
+  which does indeed directly exec ld.so.
+  If you really need to run ldd when secctl is active, so instead of running
+  > ldd programX
+  then we recommend
+  > bash (to open a new shell)
+  > export LD_TRACE_LOADED_OBJECTS=1 and run the program just normally:
+  > programX
+  > (leave bash)
+  By this way, a direct execution of ld.so can really be avoided.
+  See also > man ld.so
+- The above rule-set does not interfere with any read/write/append access.
+  We are only dealing with execution of processes here.
+
+
+EXAMPLE-2: enforce selective access profile to /proc and /sys
+
+8  accept	1000	x	/proc	*	*	d	* 
+9  accept	1000	r	/proc	*	0	r	meminfo
+10 accept	1000	r	/proc	*	1000	r	maps
+...
+16 deny	 	1000	*	/proc	*	*	*	*
+17 deny+	1000	*	/sys	*	*	*	* 
+
+rule 8:	accept access/traverse for any process under UID=1000 to any directory ('d')
+	on filesystem /proc
+rule 9: accept read-only access from any process running in UID=1000
+	to regular ('r') file "meminfo" with file UID=0 
+	(this is /proc/meminfo)
+rule 10: accept read-only access from any process running in UID=1000
+	to regular ('r') file "maps" with file UID=1000
+	(this is /proc/PID/maps with PID being any pid for any process from UID=1000)
+rule 16: finally: deny any other access from any process running in UID=1000
+	to any object in /proc
+rule 17: similarly, deny any access from any process running in UID=1000
+	to any object in /sys. Note that if you should use kind of direct render access
+	from e.g. firefox to the graphics card, then a selective access need be
+	allowed (not tested, no rule suggestion available)
+
+Try giving "deny+" for rule 16 to see how processes under UID=1000 are
+accessing objects in /proc
+
+
+EXAMPLE-3: execution whitelist for Apache WebServer (tested for 2.4.10)
+
+0  accept	 33	x	/UNIONFS	*		*	d	* 
+1  accept	 33	l	/UNIONFS	27		*	r	ld-2.19.so
+2  accept	 33	x	/UNIONFS	12345		*	r	testcgibin
+3  deny+	 33	x	/UNIONFS	*		*	*	*
+
+test case: apache is started from UID=0, then will setuid to UID=33,
+further we have compiled a very small sample binary program "testcgibin"
+which is called via apache-cgi api.
+
+rule 0:	accept access/traverse for any process under UID=33 to any directory ('d')
+	on filesystem /UNIONFS
+rule 1:	accept indirect ('l') invocation of runtime linker (for testcgibin)
+rule 2: accept execution of regular file "testcgibin" for any process running
+	under UID=33 (apache does invoke testcgibin via syscall exec())
+rule 3: deny execution of any other program for UID=33 from filesystem /UNIONFS
+	and log any match with this rule.
+
+Notes:
+
+a) Rule 3 does not prevent execution of programs from other filesystems;
+   you need to take care of that if needed, e.g. by introducing more deny rules,
+   e.g. for /KNOPPIX. 
+   We already thought about allowing a wildcard '*' for /mnt for this multiple
+   deny case - but this is not implemented yet.
+b) If we would compile "testcgibin" statically, we would not need to include
+   the dynamic linker ld-2.19.so into the whitelist.
+	
+Question: As we have one rule to execute testcgibin, why do we not need a
+rule to allow execution of the apache binary itself under UID=33 ?
+(think about it; solution is provided at bottom of this README)
+
+In a similar fashion, one could establish a rule-set for other daemons (e.g. SSHD).
+For those cases, it is very much helpful to assign a specific UID>0 to each
+relevant daemon. SSHD is a good example, which could easily be run under a
+non-privileged UID on a higher port.
+
+
+EXAMPLE-4: enforce append-only logfile
+
+0  accept	 50	x	/var		*		*	d	*
+1  accept	 50	r	/var		123456		*	r	logfile
+2  accept	 50	a	/var		123456		*	r	logfile
+3  deny+	  *	*	/var		123456		*	r	logfile
+
+rules 1 and 2 do allow read-only and append-only access. Depending
+on requirements, you might leave rule 1 out, and lock the LSM with "lock".
+No more read-access to logfile would be possible, not even for root
+(notice the wildcard after "deny+" in rule 3). To say it in other words:
+rule 3 does apply to any UID.
+Please note that for an adversary with UID=0 already, certain intricacies
+do apply. For instance, root could load a new module and compromise 
+the kernel (you better deny later loading of modules then). Or root
+could initiate a reboot of the system, leaving out secctl entirely.
+(then you might consider deactivating CAP_SYS_BOOT from userspace entirely
+until an admin does re-activate in a certain way). There a some more
+questions if we want to protect the kernel if we have a root trojan 
+in userspace already (out of scope here).
+
+
+
+EXAMPLE-5: logging of any access to /mnt from any process under UID=1000,
+	might be helpful to analyse unknown program that would deny being 
+	debugged or straced;
+
+0  accept	2000	x	/mnt	*		*		d	*
+1  accept+	2000	*	/mnt	*		*		*	*
+
+rule 0 does prevent logging directory access to /mnt
+rule 1 does log any other access to /mnt
+
+
+EXAMPLE-6: read only access to all files with owner=3000 on /data,
+	   with exception of zzzfile, which can be written to also
+	   (this example is not tested yet)
+
+0  accept	3000	x	/data	*		*		d	*
+1  accept	3000	r	/data	*		3000		r	*
+2  accept	3000	w	/data	4567		3000		r	zzzfile
+3  deny+	*	*	/data	*		*		*	*
+
+rule 1: any process running under UID=3000 may read own files from /data,
+	including "zzzfile"
+rule 2: any process running under UID=3000 may write to own "zzzfile" on /data
+	(only unique with inode-nb 4567 !)
+rule 3: deny any access to /data for any process in any UID
+
+Note that UID=3000 would have much more privileges than UID=0 to access /data,
+since UID=0 would not be able to access any object on /data
+
+
+
+EXAMPLE-7: 
+
+These rules would enfore a strict read-only access for UID=0 only 
+for any regular file on /data2 (this example is not tested yet).
+
+0  accept	0	x	/data2	*		*		d	*
+1  accept	0	r	/data2	*		*		r	*
+2  deny		*	*	/data2	*		*		*	*
+
+You might think about subtle differences to the traditional UNIX permission
+solution where you would set: -xr-------  root.root  /data2 
+(which is quite good already)
+
+
+---
+
+Further notes for all examples:
+
+For all rules, we did set policy "accept", which is default.
+That's why we most often are having an explicit deny-rule at the end of 
+a rule-set. Do not forget it!
+
+All tests were done under Knoppix 7.4 from Q4/2014, then not yet with
+the new 'l' flag for the dynamic linker; we did test with 'x' for ld.so
+at this point of time, having a more simple recognition of ld.so then)
+
+You can still give 'x' for the dynamic linker. But then any direct execution
+of ld.so will not be recognized. This would enable an easy bypass to secctl.
+So you better prefer 'l' for ld.so
+
+Let me know if you have more illustrative examples for rule-sets.
+
+
+###########################################################################
+
+Chapter 5: Whitelist vs. Blacklist rule-sets
+
+A) Whitelist-Only rule-set for executable programs (.mask='l' or 'x')
+
+We emphasize for executable programs a rule-set shall be a WHITELIST ONLY.
+Technically it is possible to establish a blacklist, but then you need to
+take special care of the dynamic linker ld.so. There might be options, however,
+this is out of scope here.
+
+For an execution whitelist, normally the dynamic linker need to get one rule
+with the 'l' flag, so that we can distinguish an indirect invocation and
+a direct execution. If you only have statically compiled programs on the whitelist,
+then you don't need ld.so at all in the rule-set. 
+See EXAMPLEs 1 and 3 above for setting a rule for the dynamic linker (ld-2.19.so).
+
+B) Whitelist or Blacklist for read/write/append rule-sets
+
+If you plan to regulate just read/write/append access to objects, then you can
+establish either a whitelist or a blacklist.
+
+
+###########################################################################
+
+Chapter 6: Howto add or change a single rule
+
+
+Here we do explain all the parameter types:
+
+Firstly, do bash> export GLOBIGNORE=\*
+to avoid standard shell wildcard expansion of '*' if this wildcard is given on cmdline.
+We thought about alternatively enclosing our cmdline in double "", but as this
+looks ugly, and would need to be repeated for every single rule, we opted to
+set GLOBIGNORE once. Please note that you better start an own shell for this
+to avoid side effects in case you forgive to reset GLOBIGNORE after use of secctl.
+
+
+Then call secctl with 9 parameters:
+
+nb	policy	UID	mask	/mnt	InodeNb	   InodeUID	type	filename
+
+	accept	 *	x	-	*	     	*	r	*
+	accept+		l					d
+	deny		r					l
+	deny+		w					s
+			a					f
+			*					c
+								b
+								*
+								
+For UID, mask, InodeNb, InodeUID, type and filename a wildcard '*' can be given.
+
+For /mnt a wildcard cannot be given at the moment. However, we already think 
+about it for those cases where access to multiple filesystems need to be denied,
+which probably could be simplified by giving '*' for /mnt. But first we need
+to think about possible side-effects before introducing this feature.
+
+
+Parameters:
+
+--- 1st: <nb> ---
+nb is number of this rule; A maximum possible number is compiled into the
+kernel LSM (RT_MAX, see common.h) with default range [0..255] now;
+
+Rules need not be contiguous, e.g. you can add rules 0,1,10,11.
+The kernel LSM takes care to quicky lookup valid rules by an LOOKUP_INDEX[].
+
+Any rule can be uniquely identified by this nb, e.g. to simply overwrite
+this rule by just giving a new rule with this nb.
+
+If you like to clear all rules, then call ">secctl cr".
+We don't have yet a command to clear a single rule. Was not needed so far,
+since in most cases we did use a little shell script for all the rules.
+
+
+--- 2nd: <policy> ---
+to (accept or deny) any access request to an object in a
+filesystem. Giving a '+' at the end of (accept or deny) does result in
+logging any rule match to the traditional system syslog facility. 
+Note that for e.g. accept+ with type='d' (directory) a lot of syslog 
+entries will be generated in short time. As we log with printk_ratelimited,
+some events might be suppressed by the kernel. 
+
+
+--- 3rd: <UID> ---
+User ID of the calling process which is about to access an object in
+a filesystem. Can only be given as number, not as UserName. 
+We do accept a wildcard '*': don't care for UID of current access then, 
+and do proceed with rule-matching.
+
+
+--- 4th: <mask> ---
+access mask that comes in with intercept_inode_permission() from the calling
+kernel, or is generated by our LSM itself as MAY_WRITE or MAY_EXEC.
+
+x - (exec program only) 
+    OR
+    (permission for directory to read content or traverse only)
+    Note this double function of 'x', which is more clearly to be seen in a 
+    specific rules-set.
+    Note also that 'x' does not allow read/write/append access
+    (the kernel does "read" the binary via another mechanism.)
+    Assuming a proper rule set, a specific executable cannot simply be 
+    overwritten or deleted by an adversary, even if traditional UNIX
+    permissions would allow it.
+l - special flag for the dynamic linker (also called runtime linker) ld.so.
+    We allow any indirect invocation of ld.so when another program is
+    exec()ed first, but we deny any direct exec(ld.so) since this would 
+    undermine our LSM. 
+r - read only access. (no exec, no write, no append)
+w - write only access. (no read, no exec)
+a - append only access.  (no read, no exec, no write before end of file)
+* - wildcard : don't care for mask of current access, proceed with rule-
+    matching.	
+
+Note the strict enforcement of 'only access'. So if you want to allow read
+_and_ write to one object, you need to set _two_ rules with 'r' and 'w' 
+respectively (see EXAMPLE-6 above).
+
+
+Internally, this <mask> parameter does use constants from $kernel/include/linux/fs.h 
+	#define MAY_EXEC		0x00000001 
+	#define MAY_WRITE		0x00000002 
+	#define MAY_READ		0x00000004 
+	#define MAY_APPEND		0x00000008 
+We do _not_ use these constants:
+	#define MAY_ACCESS		0x00000010 
+	#define MAY_OPEN		0x00000020 
+	#define MAY_CHDIR		0x00000040 
+	#define MAY_NOT_BLOCK		0x00000080 
+E.g. it seems sufficient to treat any directory access with MAY_EXEC,
+so we don't need MAY_CHDIR. 
+
+See also function sanity_check_RTE() in lsm-secctl.c, where we assign these constants
+depending on the <mask> attribute given on command line. For the sake of producing
+a little bit of redundance, we copy the relevant comment from lsm-secctl.c into
+this README:
+
+	access	ANY_	required bits	excluded bits
+	 type	 MASK	in one hook	in this hook
+	 	bit	.mask		.mask
+	----------------------------------------------
+	x	-	MAY_EXEC	MAY_READ |
+					MAY_WRITE |
+					MAY_APPEND
+			
+	l	-	<like x, for special case ld.so:
+			if calling hook is bprm (exec syscall)
+			then deny, else allow (if match)>
+	
+			
+	r	-	MAY_READ	MAY_EXEC |
+					MAY_WRITE |
+					MAY_APPEND
+	
+	w	-	MAY_WRITE	MAY_EXEC |
+					MAY_READ
+	
+	a	-	MAY_WRITE &	MAY_EXEC |
+			MAY_APPEND	MAY_READ
+
+	*	set	<don't care>	<don't care>
+	
+Example: if .mask='w', then the permission mask from the calling hook
+	- must contain MAY_WRITE,
+	- and must not contain MAY_EXEC,
+	- and must not contain MAY_READ.
+	
+You will certainly notice the great similarity to the traditional UNIX
+permission facility. Our table is a preliminary conclusion drawn from
+a strict permission policy. If you would see any favorite application to 
+combining e.g. 'w' and 'r', this section in lsm-secctl.c would be the
+place to change it accordingly.
+
+
+--- 5th: /mnt ---
+Mount point of filesystem this rule shall apply. We recommend to give
+the mount point itself, although any path _inside_ this filesystem
+does work also to identify the filesystem, as long as it is not a mount point
+of another filesystem. The UserSpace tool <secctl> does use the stat() syscall 
+to identify the device number of the given file (deviceID with minor,major part). 
+Note that '/mnt' is just an example.
+
+The filesystem must be mounted already! If not, the deviceID of the upper
+tree would be used (that is probably not what you want).
+
+We use this deviceID to uniquely identify a filesystem. Note that
+usually this deviceID should stay the same, if a filesystem gets umounted,
+and then mounted again, as long as the media is not removed from the system.
+This is an important observation when an adversary would get remote root
+access to a system and try to circumvent an active rule-set by a any
+sequence of umount and mount again. Additionlly, to counter this threat,
+we provide the "lockm" option.
+
+Although the filesystem can be sufficiently identified by giving a 
+symbolic path like /mnt, you can retrieve the numeric value of any filesystem
+directly by
+
+a) >stat /UNIONFS	(example 1)
+  File: `/UNIONFS'
+  ...
+  Device: 10h/16d	
+
+	The deviceID of /UNIONFS is 0x10
+
+   >stat /KNOPPIX	(example 2)
+  File: `/KNOPPIX'
+  ...
+  Device: f000h/..
+
+	The deviceID of /KNOPPIX is 0xF000
+
+  >stat /		(example 3)
+  File: `/'
+  ...
+  Device: 2h/2d	
+  
+	The deviceID of /	 is 0x2
+	
+b)
+  >cat /proc/1/mountinfo | grep KNOPPIX
+
+  18 1 240:0 / /KNOPPIX ro,relatime - iso9660 /dev/cloop ro
+
+	The deviceID of /KNOPPIX is 240:0 (major:minor)
+	
+	240 decimal = 0xF0 (major part)
+	
+Alternatively to giving the pathname of the mountpoint (like /mnt),
+you can give also the deviceID in hex format, like 0xF000 
+(both major and minor).
+
+Note that we use deviceIDs from global NameSpace (as seen by init process).
+Using secctl in a specificly generated local Namespace is _not_ tested. 
+DeviceIDs and UserIDs can differ in a local Namespace.
+
+Any object in one filesystem is uniquely identified only by (deviceID and InodeNb).
+
+Giving (deviceID and "filename") might not be a unique identification,
+since multiple "filename" could exist in this filesystem. This is 
+an important condition especially when setting "accept" rules.
+
+Independent from secctl, there is a small general race-condition in UserSpace 
+to remove an object, and re-create a new object with same attributes of
+the previous object, including the previous InodeNb. So you better refrain
+from setting any <write> permission to critical objects.
+
+The mountpoint path must be given with a leading '/'.
+Valid characters after '/' are alphanumeric (at least one until next '/')
+and '+' or '-'.
+There is one exception: Global Root '/' alone is OK also.
+Note that for this mountpoint path we apply very much stricter requirements
+for valid characters as for the 9th parameter (filename), see below.
+
+Giving a wildcard instead of /mnt is planned for deny-only rules.
+(not yet implemented).
+
+
+--- 6th: <InodeNb>
+is number of inode/object in a specific filesystem. We strongly recommend
+to use a specific InodeNb wherever appropriate.
+If wildcard is given,  then the LSM does not care for the inode number 
+of current access, and will proceed with rule matching.
+
+example:
+
+>ls -ali /bin/zsh5
+75331 -rwxr-xr-x 1 root root 721496 Aug 31  2014 /bin/zsh5
+-----
+this is the inode number
+
+For dynamic filesystems like /proc or /sys an InodeNb cannot be foreseen 
+(at least not reliably). You have to use the other attributes like 
+ownership of file to identify objects there. Note that (only?) the
+kernel does create objects in /proc or /sys. 
+
+
+--- 7th: <InodeUID>
+is UID of the object owner (not group)
+
+example:
+
+>l /etc/shadow
+-rw-r----- 1 root shadow 1599 Sep  9  2014 /etc/shadow
+
+"root" is the owner of file "/etc/shadow"
+
+Can only be given as number. In this example: 0 (UID of root)
+We do not accept symbolic values.
+
+If wildcard '*' is given, then the LSM does not care for InodeUID of object of
+current access, and will proceed with rule matching.
+
+
+--- 8th: <type>
+of object can be one character of [rdlsfcb] or wildcard '*'
+
+according to $kernel/include/linux/stat.h
+
+	#define S_IFMT  00170000
+	#define S_IFSOCK 0140000  	<- s 
+	#define S_IFLNK	 0120000 	<- l 
+	#define S_IFREG  0100000  	<- r 
+	#define S_IFBLK  0060000  	<- b 
+	#define S_IFDIR  0040000  	<- d 
+	#define S_IFCHR  0020000  	<- c 
+	#define S_IFIFO  0010000  	<- f 
+	#define S_ISUID  0004000 	<- we do not care about this option
+	#define S_ISGID  0002000 	<- we do not care about this option
+	#define S_ISVTX  0001000 	<- we do not care about this option
+
+Most of the time, 'r' for regular file, or 'd' for directory will
+be used. You can give also the octal value as 8th attribute (with leading 0 
+for octal value). We have a strict range checking if you give an octal numer.
+
+If wildcard is given, then the LSM does not care for type of object of current
+access, and will proceed with rule matching.
+
+
+--- 9h: <filename>
+is simple name of object as stored directly in a directory. We do not use the
+longer names which might be stored within an inode. So we have a length limit 
+of 39 characters, which does correspond to our constant (SECCTL_DNAME_INLINE_LEN-1).
+Secctl is NOT compatible with filenames longer than 39 characters!
+
+Internally, for any object access, we retrieve the short object name from
+.d_iname[] from (struct dentry), see $kernel/include/dcache.h
+
+Note: for filename, we have strict requirements for valid characters:
+You can use any of alphanumeric [a-zA-Z0-9] and any of [_-.=+"]
+So we do forbid e.g. space, '%', or any kind of brackets. 
+
+If wildcard is given, then the LSM does not care for name of object of
+current access. Internally, the <filename> will be checked last, when all
+the other attributes before would sign a possible match.
+
+
+###########################################################################
+
+Chapter 7: Security consideration
+
+ I.) for the UserSpace admin tool
+ 
+ At first, we check and set strict ressource limits (ENABLE_STRICT_RESSOURCE_LIMITS).
+ In particular, if we were started with UID/GID=0, we drop this privilege to
+ UID > 0 and GID=<secctl>. NO root permission is needed to run this program,
+ once it has been installed properly by creating a new group <secctl> and
+ permission been set respectively for /dev/secctl.
+ 
+ If ressource limit checks were successful, we start parsing command line arguments 
+ in parse_args(), check what CMD_* is given, and prepare global var RTE for later 
+ transfer to KernelSpace.
+ Then we open( SECCTL_DEVICE ) with UID>0, GID=<secctl>, making sure that we most
+ probably open the right SECCTL_DEVICE by calling lstat() before and fstat() after
+ open(). Finally we do write( 1 packet RTE ) to SECCTL_DEVICE. 
+ If we have CMD_LSM_SHOW_* then we subsequently read( multiple RTE packets )
+ from SECCTL_DEVICE.
+
+ Of course, if command line arguments would be subverted and pass our sanity
+ checks, those arguments could be used to write to SECCTL_DEVICE, even without root
+ privilege then. That's why we do strict input validation for any command line 
+ argument according to the following policy:
+  a) safely check len of argv[#]
+  b) copy max. number of characters to local array
+     (we note that argv[] is own process space already, but can we rely always on it ?)
+  c) check any single character against specific whitelist
+
+
+ II.) ... and for <secctl> in general:
+
+ Any sanity check that we do in UserSpace for RTE.elements,
+   see parse_rule(),  sanity_check_number()  and  sanity_check_diname()
+ will be repeated by our KernelSpace LSM when one RTE packet is received there.
+ Those repeated checks in KernelSpace do differ slightly, since we operate on binary
+ values then. This operation on binary values (except filename) was our major
+ motivation to move the old rule parser from secctl Version 0.1 out of the kernel to
+ our new UserSpace admin tool for Version 0.2
+ 
+ We recommend to call "secctl lock[m] <passwd>" after valid rules have been configured.
+ When our kernel LSM is locked, no other commands are accepted by the kernel LSM 
+ except "secctl unlock <passwd>". If "lockm" has been given, no further mount, umount
+ or remount syscalls will be accepted by the kernel. For this purpose, we intercept
+ respective LSM mount-hooks. This latter option could be useful to maintain partial
+ system integrity when parts of UserSpace have been compromised already. As any rule
+ in our rule-set will apply for a specific mounted filesystem, an adversary with
+ root privileges could easily mount another filesystem and execute any binary from 
+ there. Certainly this evil option does depend on a specific rule-set. Note also 
+ that /proc and /sys could most easily mounted a second time with the first mounts
+ still in place.
+ 
+ Consider a remote(!) adversary who would umount a local /filesystem, and then remount 
+ this local /filesystem. The deviceID would be the same as before. So strictly,
+ for this remote adversary, we would probably not need to lock umount/mount in
+ the kernel. However, we provide this option, taking also into account that a local(!)
+ adversary could most easily insert arbitrary storage devices to the USB bus,
+ where we could not count on having the same deviceID.
+
+ *** Warning: ***
+ To deny local mounts globally with "secctl lockm" might have side effects.
+ Any program that does rely on doing mounts later on would fail.
+  
+ Maybe our envisaged wildcard option for /mnt (for deny-rules in whitelists) could
+ provide a more suitable solution without the need to lock umount/mount.
+
+
+ III.) Environmental assumption:
+ 
+ Secctl shall be configured and _locked_ as long as the system is in a trusted status.
+ For this case, our self-protecting security measures seem to be sufficient to
+ withstand moderate attacks, which may happen later on. In the end, secctl should be
+ used just as a tool in line with appropriate other best practice measures on a UNIX
+ system. For example, consider to disable any option for late loading of kernel modules.
+ Any adversary with root privilege could affect our secctl kernel LSM via a specially 
+ crafted kernel module. Do mount filesystems no-exec or read-only wherever possible.
+
+ If there is suspicion that the system has been compromised, you better don't call
+ "secctl unlock <passwd>" then.
+
+ Remaining caveats & problems:
+
+ 1) The biggest issue is caused by the current kernel implementation of the
+    dynamic linking process via /lib/ld-linux.so.2 (ld.so), which normally is invoked
+    after the kernel does read the .interp section of an ELF executable.
+    This indirect(!) invocation of ld.so is _not_ the problem.
+
+    Unfortunately the dynamic linker could also be directly(!) called as a normal
+    ELF executable itself, like
+		> ld.so <program>
+    where argv[1] could be any program to be loaded. For <program>, no exec() syscall 
+    is needed then. This problem does exist since many decades, and was already
+    facilitated to maliciously execute binaries from a no-exec-mounted partition.
+    Ironically, this direct-exec feature of ld.so is apparently only needed to see 
+    what libraries are linked into a dynamically compiled ELF-program, like
+		> ldd <program>
+    with ldd just being a shell script to invoke > ld.so <program>.
+    However, I'd guess this (useful) feature could be achieved in a similar 
+    manner without having ld.so being an ELF-executable.
+
+    So how does this direct invocation of ld.so affect our LSM:
+
+    Imagine this (not recommended) whitelist-rule-set with just 3 rules:
+	a) 0 accept UID x /mnt * * * program1
+	b) 1 accept UID x /mnt * * * ld.so
+	c) 2 deny   UID x /mnt * * * *
+    This rule-set would allow execution of <program1> from /mnt. Further,
+    we need to allow <ld.so> as well, since <program1> is dynamically linked
+    and the kernel does access ld.so with "x" permission mask (although the
+    kernel does not intend to exec ld.so as a normal ELF binary). Unfortunately
+    any adversary could then directly invoke > ld.so <programXYZ> to execute
+    another programXYZ then. This is a really simple way to bypass our rule-set 
+    completely. 
+
+    So what can we do to prevent this bypass ?
+    
+    -- OPTION 1 --
+    compile <program1> statically, so ld.so is simply not needed.
+    Any direct call to <ld.so> would be rejected by our LSM, since it is 
+    just not on our whitelist. However, in most cases this can only be done
+    conveniently when a user can easily re-compile <program1>. In this case,
+    a static compilation is a fully sufficient solution, given a whitelist
+    rule-set like the one above No other kernel modification would be needed.
+    
+    -- OPTION 2 --
+    We introduce a special treatment of ld.so by intercepting any exec() syscall
+    in the Kernel LSM (see bprm_check()). This is what we do currently: 
+    a) specify one rule of the overall rule-set for the dynamic linker and
+       denote this rule with .mask=='l' (notice the l for _l_inker).
+    We just deny any exec(ld.so),
+    which does correspond to a direct invocation of ld.so. Note, that exec(ld.so)
+    will not be called by the kernel when ld.so is invoked indirectly.
+    The problem with Option2 might be strength of mechanism. However, with the
+    introduction of the 'l' option for .mask we think to have a working 
+    solution.
+    
+    -- OPTION 3 --
+    Recompile ld.so as just a dynamic library AND convince the kernel to not 
+    insist on ld.so being an ELF executable. Strangely, the kernel seems to insist
+    on ld.so being an ELF-executable (fs/binfmt_elf.c):
+		load_elf_interp() ...
+			if (interp_elf_ex->e_type != ET_EXEC &&
+	 		    interp_elf_ex->e_type != ET_DYN)
+			goto out;
+    We have not tested this yet. Why is this so ? Not sure if we have found the 
+    correct section there. We still need to check this further..
+    Note: any ELF-executable could easily be modified to invoke any interpreter
+    instead of ld.so. This is rather a general mechanism. Any adversary could
+    introduce this modification. However, this modified interpreter would not
+    be on our whitelist then; execution from the filesystem would be denied.
+    Option3 would be the preferred one, but is not tested yet.
+
+ 2) The current implementation of our LSM does nothing to prevent a system reboot.
+    Any adversary with root privilege could conduct a sequence of
+     a) edit system startup scripts to disable loading a secctl rule-set after reboot,
+     b) initiate a reboot, and
+     c) have unrestricted access to the entire system.
+    One option to deal with this issue is to remove CAP_SYS_BOOT globally after
+    our kernel LSM has been locked (see kernel/reboot.c). 
+    Unfortunately there seems no LSM hook which could be intercepted to deny a 
+    system reboot. Although reboot.c could be very easily modified, this would
+    be a proprietary solution then. And since we need a global solution for the
+    entire UserSpace, we cannot just call capset.
+    We would really need a new LSM hook to intercept reboot().
+
+ 3) Our secctl LSM has a clear purpose: to control access to objects in filesystems.
+    There are many other security issues and questions, which are simply outside 
+    of our scope, e.g. we do not intend to control TCP/IP or IPC. We note that
+    local UNIX domain sockets are accessible via the filesystem, but this is 
+    really not our focus.
+    Any malicious injection of executable sequences into an already(!) running
+    program would NOT be prevented by secctl. If this malicious sequence would 
+    try to compromise the system further, e.g. by accessing or executing objects 
+    from the filesystem, then secctl might intervene, depending on the active rule-set.
+    Note that we do strongly recommend to use a whitelist approach for this purpose.
+
+
+###########################################################################
+
+Chapter 8: Todo
+
+001: unify comment style (we use mixed /* and //)
+002: change coding style to kernel coding style (very much different)
+003: test other combinations of 64/32 bit (kernel/user)
+004: test 32 bit var lock_wait_for_jiffie32 in kernel module with 32 bit kernel
+     (this 32 var might overflow: our possible solution is not tested)
+     (only lock_wait_for_jiffie64 is tested)
+005: for deny-rules: add wildcard for mountpoint (maybe the most important one todo)
+006: re-introduce RT_INIT[] and SILENT_LOGB[] for kernel module
+     (removed now since these feature are not tested yet)
+007: suggest to kernel mainstream to call LSM inode_permission() hook at least one
+     time for _any_ access to an object in a filesystem. For example, in 
+     kernel 3.16.2 currently inode_permission() seems not to be called for 
+      chmod()and chown() which do call inode_settr()
+      mv()    which does call inode_rename()
+      rm()    which does call inode_unlink()
+      ln()    which does call inode_link()
+      rmdir() which does call inode_rmdir()
+     It is not a problem that those other hook are called. However, it would
+     be suitable for permission checks that inode_permission() would be 
+     called also, and before those other hooks.
+     Indeed is seems that we could omit those other hooks in our kernel module
+     entirely when inode_permission() would be called as suggested above.
+008: suggest to kernel mainstream to get rid of the issue with ld.so
+009: make a note in this README how secctl is compatible with bind-mounts
+010: mid-term: test compatibility with namespaces
+011: test several functions more exhaustively
+012: test default policy deny
+013: introduce kernel boot commandline var "seectl_rtmax=" which might give a
+     little bit more flexibily with maximum number of rules in our table RT[]
+     without the need to re-compile the kernel. Currently, a maximum number of
+     rules is set at compile time with constant RT_MAX.
+014: re-check if /dev/secctl that is not initialized when the LSM exceptionally
+     should fail to register.
+
+
+###########################################################################
+
+Chapter 9: Feedback
+
+Let me know if secctl might be useful for you, or if you have any good suggestion
+(maybe a better one for the dynamic linker).
+For installation, certainly it helps a lot being familiar with Linux kernel 
+compilation already. I'd happy to help with any specific secctl compilation issues.
+Please provide sufficient time for feedback.
+
+		<secctlfb * at * t-online dot de>
+		
+		(______fb stands for feedback)
+
+
+###########################################################################
+
+Chapter 10: Bugs
+
+We would encourage any bug report to the above feedback adress. Please provide
+sufficient time for feedback. Any bug report should have a good description
+and a code suggestion to remedy the issue. 
+
+Responsible disclosure:
+
+If the author would not give any feedback within 3 weeks, you may go public.
+Please take into account that the author has a regular job, and does program
+secctl in free time.
+
+
+###########################################################################
+
+-----------
+Solution for the apache question (EXAMPLE-3):
+ well, quite clearly: in this scenario, apache is started from UID=0, and
+ does not do any more exec syscall after setuid to UID=33; So apache is just
+ not exec-ed unter UID=33 ! If you like to change this start process, then
+ you might need a new rule.
+
+###########################################################################

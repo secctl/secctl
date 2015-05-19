@@ -1,0 +1,19 @@
+config SECURITY_SECCTL
+	bool "secctl support"
+	depends on SECURITY && NET
+	select SECURITY_PATH
+	default n
+	help
+	  This enables the secctl security module.
+	  If unsure how to answer this question, answer N.
+
+config SECURITY_SECCTL_BOOTPARAM_VALUE
+	int "secctl boot parameter default value"
+	depends on SECURITY_SECCTL
+	range 0 1
+	default 1
+	help
+	  This option sets the default value for the kernel parameter
+	  'secctl', which allows secctl to be enabled or disabled
+          at boot. 
+	  If unsure how to answer this question, answer 1.
